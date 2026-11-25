@@ -1,0 +1,15 @@
+{
+  "name": "t3lite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A small, self-hosted control plane for coding agents",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "relay": "node relay/relay.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
