@@ -497,6 +497,16 @@ function handleWs(ws) {
         const thread = makeThread(msg.projectId, msg.title);
         return;
       }
+      if (msg.type === "diff") {
+        const thread = getThread(msg.threadId);
+        if (!thread) return send(ws, { type: "error", error: "thread not found" });
+        const project = getProject(thread.project_id);
+        return send(ws, {
+          type: "diff",
+          threadId: thread.id,
+          ...getDiff(thread.worktree_path || project?.path),
+        });
+      }
       if (msg.type === "subscribe") {
         const thread = getThread(msg.threadId);
         if (!thread) return send(ws, { type: "error", error: "thread not found" });

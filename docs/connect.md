@@ -231,6 +231,36 @@ ipconfig getifaddr en0
 
 ---
 
+## 3.5 在服务器上直接用 TUI
+
+不想开浏览器时，SSH 到 daemon 机器后：
+
+```bash
+cd ~/lite-code
+node src/tui.js
+```
+
+连另一台机器：
+
+```bash
+node src/tui.js --ws ws://127.0.0.1:4317/ws
+```
+
+走 relay + E2EE：
+
+```bash
+node src/tui.js --offer "$(RELAY_URL=wss://lite.agentx1.com node src/pair.js | grep https)"
+```
+
+按键：
+
+```
+Enter 发送 · Tab 切换线程 · ↑/↓ 或 j/k 滚动
+d 看 diff · y/n 批准/拒绝 · 1-9 选择 · Esc 取消/清空 · q 退出
+```
+
+TUI 需要 TTY，适合 SSH 场景；手机还是用浏览器/PWA。
+
 ## 4. 让 daemon 常驻（systemd）
 
 不要把 token 写进 unit 文件，放到一个 600 权限的环境文件：

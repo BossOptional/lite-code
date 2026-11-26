@@ -19,6 +19,27 @@ T3LITE_MOCK=1 node src/server.js
 
 Mock 模式不会调用模型，用来调 UI。
 
+## TUI
+
+除了浏览器，还有一个极简终端界面：
+
+```bash
+node src/tui.js
+# 或连另一台 daemon
+node src/tui.js --ws ws://127.0.0.1:4317/ws
+# 或走 relay + E2EE
+node src/tui.js --offer "$(RELAY_URL=wss://lite.agentx1.com node src/pair.js | grep https)"
+```
+
+按键：
+
+```
+Enter 发送 · Tab 切换线程 · ↑/↓ 或 j/k 滚动
+d 看 diff · y/n 批准/拒绝 · 1-9 选择 · Esc 取消/清空 · q 退出
+```
+
+TUI 需要 TTY；通过 SSH 连到服务器上用也很合适。
+
 ## 接真实 Pi
 
 要求：
