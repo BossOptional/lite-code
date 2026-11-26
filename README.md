@@ -143,6 +143,61 @@ remote url: https://relay.example.com/?relay=wss%3A%2F%2Frelay.example.com&serve
 
 **当前 v0 的限制**：relay 能看到明文 JSON（TLS 只保护传输）。下一步是在 daemon 和浏览器之间加 PSK 加密（X25519 + AES-GCM），让 relay 只转发密文。别把 relay 暴露在不可信网络里。
 
+### 用 Cloudflare 做 relay（推荐）
+
+仓库里已经带了 Workers + Durable Objects 版本：`relay-cloudflare/` + `wrangler.toml`。
+
+为什么适合：
+
+- daemon 主动外连，Cloudflare 边缘做 WebSocket 终止，不需要自己的 VPS；
+- 每个 `T3LITE_SERVER_ID` 一个 Durable Object，WebSocket 用 **Hibernation API**，空闲时不收 duration 费用；
+- Workers **免费计划**就支持 SQLite-backed Durable Objects（100,000 requests/day、13,000 GB-s/day），个人用基本免费；
+- 静态 UI 由同一个 Worker 的 Assets 托管，手机打开一个 URL 就行。
+
+部署：
+
+```bash
+npm install -D wrangler
+npx wrangler login
+npx wrangler secret put RELAY_TOKEN     # 输入一个随机串
+npx wrangler deploy
+```
+
+部署输出类似：
+
+```
+https://lite-code-relay.<your-subdomain>.workers.dev
+```
+
+daemon 配置：
+
+```bash
+RELAY_URL=wss://lite-code-relay.<your-subdomain>.workers.dev RELAY_TOKEN=<你刚设置的串> T3LITE_SERVER_ID=my-linux-box node src/server.js
+```
+
+启动日志里的 `remote url` 会变成：
+
+```
+https://lite-code-relay.<your-subdomain>.workers.dev/?relay=wss%3A%2F%2F...&server=my-linux-box&hash=...
+```
+
+在手机打开它即可。UI 由 Worker 的 `ASSETS` 直接提供。
+
+本地调试：
+
+```bash
+cp .dev.vars.example .dev.vars
+npx wrangler dev
+# 另一个终端
+RELAY_URL=ws://127.0.0.1:8787 RELAY_TOKEN=dev T3LITE_SERVER_ID=dev node src/server.js
+```
+
+注意：
+
+- `wrangler.toml` 的 `[assets] run_worker_first` 只把 `/daemon`、`/client`、`/health` 交给 Worker，其余静态文件由 Assets 直接服务。
+- `RELAY_TOKEN` 没设置时 relay 不校验 daemon；生产环境务必设置。
+- 免费额度用完会直接失败（不会自动扣费），适合个人；团队用建议开 Workers Paid 或继续用自托管 relay。
+
 ## 数据
 
 ```
