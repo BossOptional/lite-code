@@ -74,8 +74,8 @@ const C = NO_COLOR
 const WELCOME = [
   "T3 Lite",
   "",
-  "Tab 切换线程 · Enter 发送 · d 看 diff · q 退出",
-  "先用 Web UI 建一个项目/线程，或直接在这里发消息。",
+  "Tab 切换线程 · Enter 发送 · n 新线程 · p 新项目 · d 看 diff · q 退出",
+  "按 p 新建项目，n 新建线程；也可以先用 Web UI 建。",
 ];
 
 const state = {
@@ -98,6 +98,9 @@ const state = {
   toastAt: 0,
   rows: 30,
   cols: 100,
+  prompt: null,
+  awaitProject: false,
+  awaitThread: false,
 };
 
 /* ---------- width-aware text ---------- */
@@ -321,17 +324,25 @@ function render() {
     out.push(left + visible[i]);
   }
 
-  const prompt = state.input ? state.input : "(输入消息…)";
+  const label = state.prompt ? state.prompt.label : "";
+  const value = state.prompt
+    ? state.prompt.value
+    : state.input || "(输入消息…)";
+  const activeInput = !!state.prompt || !!state.input;
   const inputLine = padWidth(
-    color("> ", C.cyan + C.bold) + color(prompt, state.input ? "" : C.gray) + (state.input ? "▍" : ""),
+    color("> ", C.cyan + C.bold) +
+      color(label, C.magenta) +
+      color(value, activeInput ? "" : C.gray) +
+      (activeInput ? "▍" : ""),
     cols
   );
   out.push(inputLine);
 
-  const hint =
-    state.pending
-      ? `待审批：${state.pending.title || ""}  y/n · Esc 取消`
-      : "Enter 发送 · Tab 切换 · ↑↓ 滚动 · d diff · q 退出";
+  const hint = state.prompt
+    ? "Enter 确认 · Esc 取消"
+    : state.pending
+    ? `待审批：${state.pending.title || ""}  y/n · Esc 取消`
+    : "Enter 发送 · Tab 切换 · n 新线程 · p 新项目 · ↑↓ 滚动 · d diff · q 退出";
   const toast = state.toast && Date.now() - state.toastAt < 3000 ? "  " + state.toast : "";
   out.push(padWidth(color(`${hint}${toast}`, C.gray), cols));
 
@@ -413,8 +424,44 @@ function respondPermission(response) {
   render();
 }
 
+function newThreadTitle() {
+  return `Thread ${new Date().toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  })}`;
+}
+
+function submitPrompt() {
+  const p = state.prompt;
+  if (!p) return;
+  const value = p.value.trim();
+  if (!value) return toast("路径不能为空");
+  if (p.kind === "project") {
+    state.awaitProject = true;
+    send({ type: "createProject", path: value });
+  }
+  state.prompt = null;
+  render();
+}
+
 function handleKey(key, seq) {
   if (key === "\x03") exit(); // Ctrl-C
+  if (state.prompt) {
+    if (key === "\r" || key === "\n") return submitPrompt();
+    if (key === "\x1b") {
+      state.prompt = null;
+      return render();
+    }
+    if (key === "\x7f" || key === "\b") {
+      state.prompt.value = [...state.prompt.value].slice(0, -1).join("");
+      return render();
+    }
+    if (key >= " " && key !== "\x7f") {
+      state.prompt.value += key;
+      render();
+    }
+    return;
+  }
   if (seq === "\x1b[A") {
     state.scroll = Math.min(state.scroll + 1, 9999);
     render();
@@ -473,6 +520,20 @@ function handleKey(key, seq) {
     }
     if (key === "k") {
       state.scroll = Math.max(0, state.scroll - 1);
+      return render();
+    }
+    if (key === "n") {
+      if (!state.activeProjectId) return toast("先按 p 新建项目");
+      state.awaitThread = true;
+      send({
+        type: "createThread",
+        projectId: state.activeProjectId,
+        title: newThreadTitle(),
+      });
+      return toast("正在新建线程…");
+    }
+    if (key === "p") {
+      state.prompt = { kind: "project", label: "项目路径: ", value: "" };
       return render();
     }
     if (key === "d") {
@@ -631,11 +692,28 @@ function handle(msg) {
   if (msg.type === "project") {
     if (!state.projects.some((p) => p.id === msg.project.id)) state.projects.push(msg.project);
     state.activeProjectId = msg.project.id;
+    if (state.awaitProject) {
+      state.awaitProject = false;
+      state.awaitThread = true;
+      send({
+        type: "createThread",
+        projectId: msg.project.id,
+        title: newThreadTitle(),
+      });
+      render();
+      return;
+    }
     render();
     return;
   }
   if (msg.type === "thread") {
     upsertThread(msg.thread);
+    if (state.awaitThread) {
+      state.awaitThread = false;
+      state.activeProjectId = msg.thread.project_id;
+      selectThread(msg.thread.id);
+      return;
+    }
     if (!state.activeThreadId) {
       state.activeProjectId = msg.thread.project_id;
       selectThread(msg.thread.id);
@@ -691,6 +769,8 @@ function handle(msg) {
     return;
   }
   if (msg.type === "error") {
+    state.awaitProject = false;
+    state.awaitThread = false;
     toast(msg.error || "error");
   }
 }

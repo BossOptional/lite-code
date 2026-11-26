@@ -34,7 +34,7 @@ node src/tui.js --offer "$(RELAY_URL=wss://lite.agentx1.com node src/pair.js | g
 按键：
 
 ```
-Enter 发送 · Tab 切换线程 · ↑/↓ 或 j/k 滚动
+Enter 发送 · Tab 切换线程 · n 新线程 · p 新项目 · ↑/↓ 或 j/k 滚动
 d 看 diff · y/n 批准/拒绝 · 1-9 选择 · Esc 取消/清空 · q 退出
 ```
 
