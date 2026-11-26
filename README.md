@@ -7,6 +7,8 @@
 - 每个线程一个 git worktree；每轮结束能看 diff。
 - 可以直接跑在 Linux 服务器上，通过 relay 从手机/另一台电脑连回来。
 
+> 从另一台电脑/手机连接的完整步骤（Cloudflare relay / Tailscale / 局域网、配对、systemd、故障排查）：[docs/connect.md](docs/connect.md)
+
 ## 快速开始（本机 mock）
 
 ```bash
