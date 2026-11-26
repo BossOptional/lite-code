@@ -12,6 +12,9 @@
  */
 
 import WebSocket from "ws";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { SecureClient, sha256Hex, unb64u } from "../public/e2ee.js";
 
 const args = process.argv.slice(2);
@@ -31,8 +34,13 @@ Options:
   -h, --help       show this help
 
 Keys:
-  Enter send · Tab next thread · ↑/↓ or j/k scroll · d diff
-  y/n approve/deny · 1-9 select · Esc cancel/clear · q quit
+  Enter send · Tab next thread · n new thread · p new project
+  ↑/↓ or j/k scroll · d diff · y/n approve/deny · 1-9 select
+  Esc cancel/clear · q quit
+
+In the project-path prompt:
+  Tab completes directories · ~ and relative paths are supported
+  Enter validates and creates · Esc cancels
 `);
   process.exit(0);
 }
@@ -101,6 +109,7 @@ const state = {
   prompt: null,
   awaitProject: false,
   awaitThread: false,
+  lastDir: null,
 };
 
 /* ---------- width-aware text ---------- */
@@ -338,8 +347,28 @@ function render() {
   );
   out.push(inputLine);
 
+  let promptHint = "Enter 确认 · Tab 补全 · Esc 取消";
+  if (state.prompt) {
+    const abs = expandPath(state.prompt.value);
+    const st = abs ? pathStatus(abs) : null;
+    const meta = state.prompt.error
+      ? state.prompt.error
+      : st
+      ? st.ok
+        ? st.git
+          ? "git ✓"
+          : "目录 ✓（非 git）"
+        : st.msg
+      : "";
+    const cands =
+      state.prompt.candidates?.length
+        ? " · " + state.prompt.candidates.join("  ")
+        : "";
+    promptHint += meta ? " · " + meta : "";
+    promptHint += cands;
+  }
   const hint = state.prompt
-    ? "Enter 确认 · Esc 取消"
+    ? promptHint
     : state.pending
     ? `待审批：${state.pending.title || ""}  y/n · Esc 取消`
     : "Enter 发送 · Tab 切换 · n 新线程 · p 新项目 · ↑↓ 滚动 · d diff · q 退出";
@@ -424,6 +453,68 @@ function respondPermission(response) {
   render();
 }
 
+function tildify(p) {
+  const h = homedir();
+  if (p === h) return "~";
+  if (p.startsWith(h + "/")) return "~" + p.slice(h.length);
+  return p;
+}
+
+function expandPath(input) {
+  let p = String(input || "").trim().replace(/^['"]|['"]$/g, "");
+  if (!p) return null;
+  if (p === "~") p = homedir();
+  else if (p.startsWith("~/")) p = join(homedir(), p.slice(2));
+  if (!isAbsolute(p)) p = resolve(process.cwd(), p);
+  return p.replace(/\/+$/, "") || "/";
+}
+
+function pathStatus(p) {
+  if (!p) return { ok: false, msg: "请输入路径" };
+  try {
+    const st = statSync(p);
+    if (!st.isDirectory()) return { ok: false, msg: "不是目录" };
+    return { ok: true, git: existsSync(join(p, ".git")) };
+  } catch {
+    return { ok: false, msg: "目录不存在" };
+  }
+}
+
+function completePath(input) {
+  const expanded = expandPath(input);
+  if (!expanded) return { value: input, candidates: [] };
+  const endsSlash = String(input).endsWith("/");
+  const base = endsSlash ? expanded : dirname(expanded);
+  const prefix = endsSlash ? "" : expanded.slice(base.length).replace(/^\//, "");
+  let entries;
+  try {
+    entries = readdirSync(base, { withFileTypes: true });
+  } catch {
+    return { value: input, candidates: [] };
+  }
+  const showHidden = prefix.startsWith(".");
+  const matches = entries
+    .filter(
+      (e) =>
+        e.isDirectory() &&
+        (showHidden || !e.name.startsWith(".")) &&
+        e.name.startsWith(prefix)
+    )
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b));
+  if (!matches.length) return { value: input, candidates: [] };
+  if (matches.length === 1) {
+    return { value: tildify(join(base, matches[0]) + "/"), candidates: [] };
+  }
+  let lcp = matches[0];
+  for (const m of matches) {
+    while (lcp && !m.startsWith(lcp)) lcp = lcp.slice(0, -1);
+    if (!lcp) break;
+  }
+  const next = lcp ? tildify(join(base, lcp)) : input;
+  return { value: next, candidates: matches.slice(0, 6) };
+}
+
 function newThreadTitle() {
   return `Thread ${new Date().toLocaleTimeString([], {
     hour: "2-digit",
@@ -434,11 +525,17 @@ function newThreadTitle() {
 function submitPrompt() {
   const p = state.prompt;
   if (!p) return;
-  const value = p.value.trim();
-  if (!value) return toast("路径不能为空");
   if (p.kind === "project") {
+    const abs = expandPath(p.value);
+    const st = pathStatus(abs);
+    if (!st.ok) {
+      p.error = st.msg;
+      return render();
+    }
+    p.error = null;
+    state.lastDir = dirname(abs);
     state.awaitProject = true;
-    send({ type: "createProject", path: value });
+    send({ type: "createProject", path: abs });
   }
   state.prompt = null;
   render();
@@ -452,12 +549,29 @@ function handleKey(key, seq) {
       state.prompt = null;
       return render();
     }
+    if (key === "\t") {
+      const res = completePath(state.prompt.value);
+      state.prompt.value = res.value;
+      state.prompt.candidates = res.candidates;
+      state.prompt.error = null;
+      return render();
+    }
+    if (key === "\x15") {
+      state.prompt.value = "";
+      state.prompt.candidates = [];
+      state.prompt.error = null;
+      return render();
+    }
     if (key === "\x7f" || key === "\b") {
       state.prompt.value = [...state.prompt.value].slice(0, -1).join("");
+      state.prompt.candidates = [];
+      state.prompt.error = null;
       return render();
     }
     if (key >= " " && key !== "\x7f") {
       state.prompt.value += key;
+      state.prompt.candidates = [];
+      state.prompt.error = null;
       render();
     }
     return;
@@ -533,7 +647,13 @@ function handleKey(key, seq) {
       return toast("正在新建线程…");
     }
     if (key === "p") {
-      state.prompt = { kind: "project", label: "项目路径: ", value: "" };
+      state.prompt = {
+        kind: "project",
+        label: "项目路径: ",
+        value: state.lastDir ? tildify(state.lastDir) + "/" : "~/",
+        candidates: [],
+        error: null,
+      };
       return render();
     }
     if (key === "d") {
