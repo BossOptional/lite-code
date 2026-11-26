@@ -118,7 +118,7 @@ relay.example.com {
 }
 ```
 
-### 2. daemon 配置
+### 2. daemon 配置与配对
 
 ```bash
 RELAY_URL=wss://relay.example.com \
@@ -127,21 +127,30 @@ T3LITE_SERVER_ID=my-linux-box \
 node src/server.js
 ```
 
-启动日志会打印一个 URL：
+然后生成配对链接（在 daemon 机器上）：
+
+```bash
+RELAY_URL=wss://relay.example.com node src/pair.js
+```
+
+它会打印：
 
 ```
-remote url: https://relay.example.com/?relay=wss%3A%2F%2Frelay.example.com&server=my-linux-box&hash=...
+https://relay.example.com/#offer=...
 ```
 
-在手机浏览器打开它。之后会记住 relay 配置；不需要每次带参数。
+手机打开这个链接。`#offer` 是 URL fragment，浏览器不会把它发给 relay。
 
-### 3. 认证
+### 3. 配对与 E2EE
 
-- daemon → relay：`RELAY_TOKEN`（Bearer）。
-- 浏览器 → relay：`hash = sha256(pair_secret)`，`pair_secret` 首次启动时生成并存进 SQLite。
-- relay 只做通道复用和转发，不解析应用协议。
-
-**当前 v0 的限制**：relay 能看到明文 JSON（TLS 只保护传输）。下一步是在 daemon 和浏览器之间加 PSK 加密（X25519 + AES-GCM），让 relay 只转发密文。别把 relay 暴露在不可信网络里。
+- daemon 首次启动生成持久 X25519 密钥对：`~/.t3lite/daemon-key.json`（0600）。
+- 配对链接的 fragment 里是 `{relay, server, daemon public key, exp}`；不包含私钥。
+- 客户端用一次性 X25519 密钥与 daemon 做 ECDH，HKDF-SHA256 派生 AES-256-GCM key；握手双方互相验证，之后每条消息加密并带递增计数器。
+- relay 只看到 IP、连接时间、消息大小和密文；无法读取或篡改内容。
+- 链接就是 trust anchor：谁拿到链接谁就能连 daemon（和 Paseo 一样）。默认 24 小时过期，`T3LITE_PAIR_TTL_MS` 可调。
+- relay 层的 `hash = sha256("t3lite-pair:" + daemonPublicKey)` 只是路由门禁，不是安全边界；真正的认证是 E2EE 握手。
+- 撤销所有设备：删除 `~/.t3lite/daemon-key.json` 并重启 daemon，旧链接全部失效。
+- 在 daemon 本机也可以 `GET /api/pair` 生成链接。
 
 ### 用 Cloudflare 做 relay（推荐）
 
@@ -183,11 +192,13 @@ daemon 配置：
 RELAY_URL=wss://lite.agentx1.com RELAY_TOKEN=<你刚设置的串> T3LITE_SERVER_ID=my-linux-box node src/server.js
 ```
 
-启动日志里的 `remote url` 会变成：
+然后在 daemon 机器上生成配对链接：
 
+```bash
+RELAY_URL=wss://lite.agentx1.com node src/pair.js
 ```
-https://lite.agentx1.com/?relay=wss%3A%2F%2F...&server=my-linux-box&hash=...
-```
+
+打开打印的 `https://lite.agentx1.com/#offer=...` 即可。
 
 换成你自己的域名：改 `wrangler.toml` 里的 `routes`，确保域名在同一个 Cloudflare 账号下，然后重新 `wrangler deploy`。
 
@@ -236,7 +247,7 @@ RELAY_URL=ws://127.0.0.1:8787 RELAY_TOKEN=dev T3LITE_SERVER_ID=dev node src/serv
 
 ## 还没做（按优先级）
 
-1. **relay E2EE**：pair_secret 派生密钥，relay 只转发密文。
+1. **每设备密钥 / 撤销**：现在只有 daemon 持久密钥；撤销单个设备需要轮换 daemon key（会让所有设备失效）。
 2. **审批体验**：现在只转发 Pi 扩展发来的 dialog；下一步做"默认模式"选择、记住本次会话的 allow，以及审批超时。
 3. **多 agent**：Claude Code / Codex 通过 ACP adapter 接进来（保留 `Agent` 接口）。
 4. **终端 tab**：xterm.js + PTY（需要 `node-pty`，v1 再说）。

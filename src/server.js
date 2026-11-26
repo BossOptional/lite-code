@@ -19,7 +19,11 @@ import {
   getSetting,
   setSetting,
 } from "./db.js";
-import { startRelayClient, pairHash } from "./relay-client.js";
+import { startRelayClient } from "./relay-client.js";
+import { loadOrCreateKeyPair } from "./keys.js";
+import { SecureServer } from "./secure-server.js";
+import { b64u, sha256Hex } from "../public/e2ee.js";
+import { buildPairOffer } from "./pairing.js";
 import { createWorktree, removeWorktree, getDiff } from "./worktree.js";
 import { PiAgent } from "./pi-agent.js";
 import { MockAgent } from "./mock-agent.js";
@@ -29,6 +33,10 @@ const PUBLIC = join(__dirname, "..", "public");
 const PORT = Number(process.env.PORT || 4317);
 const HOST = process.env.HOST || "127.0.0.1";
 const MOCK = process.env.T3LITE_MOCK === "1";
+
+/** Paseo-style persistent daemon identity. */
+const KEYPAIR = await loadOrCreateKeyPair();
+let SERVER_ID = null;
 
 /** threadId -> { agent, status, pendingUi: Map } */
 const sessions = new Map();
@@ -377,6 +385,20 @@ const server = http.createServer(async (req, res) => {
 
     if (p === "/api/health") return json(res, 200, { ok: true, mock: MOCK });
 
+    if (p === "/api/pair" && m === "GET") {
+      const addr = req.socket.remoteAddress || "";
+      const local =
+        addr === "127.0.0.1" ||
+        addr === "::1" ||
+        addr === "::ffff:127.0.0.1";
+      if (!local) return json(res, 403, { error: "pair from localhost only" });
+      try {
+        return json(res, 200, await makePairOffer());
+      } catch (e) {
+        return json(res, 400, { error: e.message });
+      }
+    }
+
     if (p === "/api/bootstrap" && m === "GET") {
       return json(res, 200, {
         projects: listProjects(),
@@ -519,49 +541,82 @@ for (const t of listThreads()) {
   }
 }
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   log(`t3lite listening on http://${HOST}:${PORT}  (mock=${MOCK})`);
   log("Pi:", process.env.PI_BIN || "pi");
-  setupRelay();
+  await setupRelay();
 });
 
 let relayHandle = null;
 
-function setupRelay() {
+function defaultServerId() {
+  return (
+    os.hostname().replace(/[^a-zA-Z0-9_-]/g, "-") +
+    "-" +
+    crypto.randomBytes(2).toString("hex")
+  );
+}
+
+function ensureServerId() {
+  if (SERVER_ID) return SERVER_ID;
+  SERVER_ID =
+    process.env.T3LITE_SERVER_ID || getSetting("server_id") || defaultServerId();
+  setSetting("server_id", SERVER_ID);
+  return SERVER_ID;
+}
+
+async function relayGateHash() {
+  // Relay-level gate only. Real authentication is the E2EE handshake.
+  return sha256Hex("t3lite-pair:" + KEYPAIR.publicKeyB64);
+}
+
+async function handleRelaySocket(vs) {
+  const serverId = ensureServerId();
+  const secure = new SecureServer(vs, {
+    serverId,
+    privateKey: KEYPAIR.privateKey,
+    publicKeyB64: KEYPAIR.publicKeyB64,
+  });
+  secure.on("error", (e) => log("relay secure error:", e.message));
+  try {
+    await secure.start();
+  } catch (e) {
+    log("relay handshake failed:", e.message);
+    try {
+      vs.close();
+    } catch {}
+    return;
+  }
+  handleWs(secure);
+}
+
+async function setupRelay() {
   const relayUrl = process.env.RELAY_URL;
   if (!relayUrl) return;
-
-  let serverId = process.env.T3LITE_SERVER_ID || getSetting("server_id");
-  if (!serverId) {
-    serverId =
-      os.hostname().replace(/[^a-zA-Z0-9_-]/g, "-") +
-      "-" +
-      crypto.randomBytes(2).toString("hex");
-    setSetting("server_id", serverId);
-  }
-
-  let secret = getSetting("pair_secret");
-  if (!secret) {
-    secret = crypto.randomBytes(24).toString("base64url");
-    setSetting("pair_secret", secret);
-  }
-  const hash = pairHash(secret);
-
+  ensureServerId();
+  const hash = await relayGateHash();
   relayHandle = startRelayClient({
     url: relayUrl,
     token: process.env.RELAY_TOKEN || "",
-    serverId,
+    serverId: SERVER_ID,
     hash,
-    onSocket: handleWs,
+    onSocket: handleRelaySocket,
     log,
   });
+  log(`relay: ${relayUrl} server=${SERVER_ID}`);
+  log("pair: node src/pair.js   (or GET /api/pair on localhost)");
+}
 
-  const httpBase = relayUrl.replace(/^ws/, "http").replace(/\/$/, "");
-  log(
-    `remote url: ${httpBase}/?relay=${encodeURIComponent(
-      relayUrl
-    )}&server=${encodeURIComponent(serverId)}&hash=${hash}`
-  );
+async function makePairOffer() {
+  const relay = process.env.RELAY_URL || getSetting("relay_url");
+  if (!relay) throw new Error("RELAY_URL not configured");
+  ensureServerId();
+  return buildPairOffer({
+    relay,
+    serverId: SERVER_ID,
+    publicKeyB64: KEYPAIR.publicKeyB64,
+    ttlMs: Number(process.env.T3LITE_PAIR_TTL_MS || 24 * 3600 * 1000),
+  });
 }
 
 function shutdown() {

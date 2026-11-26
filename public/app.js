@@ -1,3 +1,5 @@
+import { SecureClient, sha256Hex, unb64u } from "/e2ee.js";
+
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -19,35 +21,58 @@ const S = {
   mock: false,
   retry: 0,
   pendingThread: false,
+  secure: null,
+  queue: [],
 };
 
-/* Remote mode: ?relay=wss://...&server=...&hash=... */
+/*
+ * Pairing link: https://relay/#offer=<base64url({v,relay,server,pub,exp})>
+ * The fragment never reaches the relay. The daemon public key is the trust
+ * anchor for the E2EE handshake.
+ */
 const params = new URLSearchParams(location.search);
 if (params.get("local") === "1") {
   localStorage.removeItem("t3lite.remote");
 }
 let REMOTE = null;
-if (params.get("relay") && params.get("server") && params.get("hash")) {
-  REMOTE = {
-    relay: params.get("relay"),
-    server: params.get("server"),
-    hash: params.get("hash"),
-  };
-  localStorage.setItem("t3lite.remote", JSON.stringify(REMOTE));
-  history.replaceState(null, "", location.pathname);
-} else {
+const frag = new URLSearchParams(location.hash.slice(1));
+const offerRaw = frag.get("offer");
+if (offerRaw) {
   try {
-    REMOTE = JSON.parse(localStorage.getItem("t3lite.remote") || "null");
+    const offer = JSON.parse(new TextDecoder().decode(unb64u(offerRaw)));
+    if (offer.v === 1 && offer.relay && offer.server && offer.pub) {
+      REMOTE = {
+        relay: offer.relay,
+        server: offer.server,
+        daemonPub: offer.pub,
+        exp: offer.exp,
+      };
+      localStorage.setItem("t3lite.remote", JSON.stringify(REMOTE));
+      history.replaceState(null, "", location.pathname);
+    }
   } catch {
     REMOTE = null;
   }
 }
+if (!REMOTE) {
+  try {
+    const saved = JSON.parse(localStorage.getItem("t3lite.remote") || "null");
+    if (saved?.daemonPub) REMOTE = saved;
+    else if (saved) localStorage.removeItem("t3lite.remote");
+  } catch {
+    REMOTE = null;
+  }
+}
+const REMOTE_EXPIRED = REMOTE?.exp && Date.now() > REMOTE.exp;
 
 function sendMsg(obj) {
+  if (REMOTE) {
+    if (S.secure?.ready) S.secure.send(JSON.stringify(obj));
+    else S.queue.push(obj);
+    return;
+  }
   if (!S.ws || S.ws.readyState !== 1) return;
-  S.ws.send(
-    REMOTE ? JSON.stringify({ type: "data", data: JSON.stringify(obj) }) : JSON.stringify(obj)
-  );
+  S.ws.send(JSON.stringify(obj));
 }
 
 async function api(path, opts = {}) {
@@ -354,27 +379,25 @@ function selectThread(id) {
 
 /* ---------- websocket ---------- */
 
-function connect() {
+async function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   let endpoint;
   if (REMOTE) {
+    const hash = await sha256Hex("t3lite-pair:" + REMOTE.daemonPub);
     const base = REMOTE.relay.replace(/^http/, "ws").replace(/\/$/, "");
     endpoint = `${base}/client?server=${encodeURIComponent(
       REMOTE.server
-    )}&hash=${encodeURIComponent(REMOTE.hash)}`;
+    )}&hash=${hash}`;
   } else {
     endpoint = `${proto}://${location.host}/ws`;
   }
   const ws = new WebSocket(endpoint);
   S.ws = ws;
-
-  ws.onopen = () => {
-    S.retry = 0;
-    setConn(true, REMOTE ? "已连接 · relay" : "已连接");
-    sendMsg({ type: "bootstrap" });
-  };
+  S.secure = null;
+  S.queue = [];
 
   ws.onclose = () => {
+    S.secure = null;
     setConn(false, "断线，重连中…");
     S.retry = Math.min(S.retry + 1, 6);
     setTimeout(connect, 500 * S.retry);
@@ -382,23 +405,54 @@ function connect() {
 
   ws.onerror = () => setConn(false, "连接失败");
 
-  ws.onmessage = (ev) => {
-    let msg;
-    try {
-      msg = JSON.parse(ev.data);
-    } catch {
-      return;
-    }
-    if (REMOTE) {
-      if (msg.type === "open") return;
-      if (msg.type !== "data") return;
+  if (!REMOTE) {
+    ws.onopen = () => {
+      S.retry = 0;
+      setConn(true, "已连接");
+      sendMsg({ type: "bootstrap" });
+    };
+    ws.onmessage = (ev) => {
+      let msg;
       try {
-        msg = JSON.parse(msg.data);
+        msg = JSON.parse(ev.data);
       } catch {
         return;
       }
+      handle(msg);
+    };
+    return;
+  }
+
+  ws.onopen = async () => {
+    S.secure = new SecureClient(ws, {
+      serverId: REMOTE.server,
+      daemonPub: REMOTE.daemonPub,
+    });
+    S.secure.onMessage = (text) => {
+      try {
+        handle(JSON.parse(text));
+      } catch {}
+    };
+    S.secure.onError = (e) => {
+      setConn(false, "加密握手失败");
+      showToast(e.message);
+      try {
+        ws.close();
+      } catch {}
+    };
+    try {
+      await S.secure.start();
+    } catch (e) {
+      showToast("配对失败：" + e.message);
+      try {
+        ws.close();
+      } catch {}
+      return;
     }
-    handle(msg);
+    S.retry = 0;
+    setConn(true, "已连接 · E2EE");
+    for (const m of S.queue.splice(0)) S.secure.send(JSON.stringify(m));
+    sendMsg({ type: "bootstrap" });
   };
 }
 
@@ -508,6 +562,11 @@ function handle(msg) {
 /* ---------- actions ---------- */
 
 function boot() {
+  if (REMOTE_EXPIRED) {
+    REMOTE = null;
+    localStorage.removeItem("t3lite.remote");
+    showToast("配对链接已过期，请在 daemon 上重新运行 node src/pair.js");
+  }
   connect();
 }
 
