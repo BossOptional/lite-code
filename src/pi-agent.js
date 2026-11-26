@@ -147,12 +147,18 @@ export class PiAgent extends EventEmitter {
     this.send({ type: "extension_ui_response", id, ...response });
   }
 
-  stop() {
+  stop(immediate = false) {
     if (!this.proc) return;
-    try {
-      this.proc.stdin.end();
-    } catch {}
     const proc = this.proc;
+    try {
+      proc.stdin.end();
+    } catch {}
+    if (immediate) {
+      try {
+        proc.kill("SIGTERM");
+      } catch {}
+      return;
+    }
     setTimeout(() => {
       if (this.proc === proc) {
         try {

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A small, self-hosted control plane for coding agents",
   "scripts": {
-    "dev": "node --watch src/server.js",
+    "dev": "node --watch --watch-path=src --watch-preserve-output src/server.js",
     "start": "node src/server.js",
     "relay": "node relay/relay.js",
     "tui": "node src/tui.js"

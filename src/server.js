@@ -631,9 +631,17 @@ async function makePairOffer() {
 
 function shutdown() {
   relayHandle?.stop?.();
-  for (const s of sessions.values()) s.agent?.stop?.();
+  for (const s of sessions.values()) s.agent?.stop?.(true);
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500);
 }
+
+process.on("exit", () => {
+  for (const s of sessions.values()) {
+    try {
+      s.agent?.proc?.kill?.("SIGTERM");
+    } catch {}
+  }
+});
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

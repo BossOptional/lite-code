@@ -19,6 +19,23 @@ T3LITE_MOCK=1 node src/server.js
 
 Mock 模式不会调用模型，用来调 UI。
 
+## 开发时热重启
+
+```bash
+npm run dev
+```
+
+`node --watch` 会监听 `src/` 下的文件，保存后自动重启 daemon。`public/` 是静态文件，改完刷新浏览器即可，不需要重启。
+
+重启时：
+
+- SQLite、项目、线程、items 都在，不会丢；
+- 正在跑的 Pi 进程会被停掉；
+- Web UI 会自动重连；
+- TUI 断线后按 `r` 重连。
+
+生产环境不要用 `--watch`，用 systemd 的 `Restart=always`。
+
 ## TUI
 
 除了浏览器，还有一个极简终端界面：
