@@ -1,8 +1,12 @@
 name = "lite-code-relay"
 main = "relay-cloudflare/worker.js"
 compatibility_date = "2026-11-26"
-workers_dev = true
+workers_dev = false
 preview_urls = false
+
+routes = [
+  { pattern = "lite.agentx1.com", custom_domain = true }
+]
 
 [assets]
 directory = "./public"

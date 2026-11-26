@@ -163,23 +163,33 @@ npx wrangler secret put RELAY_TOKEN     # 输入一个随机串
 npx wrangler deploy
 ```
 
-部署输出类似：
+本仓库的 `wrangler.toml` 已经配好自定义域名：
+
+```toml
+routes = [
+  { pattern = "lite.agentx1.com", custom_domain = true }
+]
+```
+
+部署时 Wrangler 会自动创建 DNS 记录和证书。当前线上地址：
 
 ```
-https://lite-code-relay.<your-subdomain>.workers.dev
+https://lite.agentx1.com
 ```
 
 daemon 配置：
 
 ```bash
-RELAY_URL=wss://lite-code-relay.<your-subdomain>.workers.dev RELAY_TOKEN=<你刚设置的串> T3LITE_SERVER_ID=my-linux-box node src/server.js
+RELAY_URL=wss://lite.agentx1.com RELAY_TOKEN=<你刚设置的串> T3LITE_SERVER_ID=my-linux-box node src/server.js
 ```
 
 启动日志里的 `remote url` 会变成：
 
 ```
-https://lite-code-relay.<your-subdomain>.workers.dev/?relay=wss%3A%2F%2F...&server=my-linux-box&hash=...
+https://lite.agentx1.com/?relay=wss%3A%2F%2F...&server=my-linux-box&hash=...
 ```
+
+换成你自己的域名：改 `wrangler.toml` 里的 `routes`，确保域名在同一个 Cloudflare 账号下，然后重新 `wrangler deploy`。
 
 在手机打开它即可。UI 由 Worker 的 `ASSETS` 直接提供。
 
