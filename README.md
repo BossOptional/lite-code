@@ -19,6 +19,41 @@ T3LITE_MOCK=1 node src/server.js
 
 Mock 模式不会调用模型，用来调 UI。
 
+## daemon 快捷管理
+
+```bash
+./bin/t3lite start      # 后台启动，写 pid + log
+./bin/t3lite stop       # 优雅停止（SIGTERM → SIGKILL）
+./bin/t3lite restart
+./bin/t3lite status     # pid / uptime / health / 路径
+./bin/t3lite logs -f    # 跟踪日志
+./bin/t3lite pair       # 生成配对链接（需要 RELAY_URL）
+./bin/t3lite tui        # 连本机 daemon 的 TUI
+./bin/t3lite doctor     # 检查 node / pi / git / health / relay
+./bin/t3lite run        # 前台运行（不带 pidfile）
+```
+
+也可以：
+
+```bash
+npm run daemon -- status
+ln -s "$PWD/bin/t3lite" ~/.local/bin/t3lite   # 之后直接 t3lite status
+```
+
+配置放在 `~/.t3lite/env`（或 `/etc/t3lite.env`，或 `T3LITE_ENV_FILE` 指定）：
+
+```bash
+T3LITE_HOME=/home/you/.t3lite
+PORT=4317
+HOST=127.0.0.1
+RELAY_URL=wss://lite.agentx1.com
+RELAY_TOKEN=replace-me
+T3LITE_SERVER_ID=my-linux-box
+# PI_BIN=/home/you/.local/bin/pi
+```
+
+脚本会读取它，`start/stop/status/logs/pair/tui/doctor` 都用同一套环境。pid 和日志在 `$T3LITE_HOME/daemon.pid` / `daemon.log`。
+
 ## 开发时热重启
 
 ```bash

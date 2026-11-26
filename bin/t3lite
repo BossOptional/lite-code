@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# Small daemon manager for T3 Lite.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+T3LITE_HOME="${T3LITE_HOME:-$HOME/.t3lite}"
+
+ENV_FILE="${T3LITE_ENV_FILE:-}"
+if [ -z "$ENV_FILE" ]; then
+  if [ -f "$T3LITE_HOME/env" ]; then
+    ENV_FILE="$T3LITE_HOME/env"
+  elif [ -f /etc/t3lite.env ]; then
+    ENV_FILE="/etc/t3lite.env"
+  fi
+fi
+
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
+T3LITE_HOME="${T3LITE_HOME:-$HOME/.t3lite}"
+PORT="${PORT:-4317}"
+HOST="${HOST:-127.0.0.1}"
+PID_FILE="$T3LITE_HOME/daemon.pid"
+LOG_FILE="$T3LITE_HOME/daemon.log"
+
+export T3LITE_HOME PORT HOST
+for v in RELAY_URL RELAY_TOKEN T3LITE_SERVER_ID PI_BIN PI_HOME T3LITE_PAIR_TTL_MS; do
+  if [ -n "${!v:-}" ]; then export "$v"; fi
+done
+
+mkdir -p "$T3LITE_HOME"
+umask 077
+
+say() { printf '%s\n' "$*"; }
+die() { printf 't3lite: %s\n' "$*" >&2; exit 1; }
+
+looks_like_daemon() {
+  local pid="$1"
+  command -v ps >/dev/null 2>&1 || return 0
+  local cmd
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  # If ps cannot inspect the process (sandbox/permissions), trust the pidfile.
+  [ -z "$cmd" ] && return 0
+  printf '%s' "$cmd" | grep -q "src/server.js"
+}
+
+is_running() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  looks_like_daemon "$pid"
+}
+
+running_pid() { cat "$PID_FILE" 2>/dev/null || true; }
+
+health_url() {
+  local h="$HOST"
+  [ "$h" = "0.0.0.0" ] && h="127.0.0.1"
+  [ "$h" = "::" ] && h="[::1]"
+  printf 'http://%s:%s/api/health' "$h" "$PORT"
+}
+
+cmd_start() {
+  if is_running; then
+    say "already running (pid $(running_pid))"
+    return 0
+  fi
+  command -v node >/dev/null || die "node not found"
+  say "starting daemon…"
+  : >>"$LOG_FILE"
+  nohup node src/server.js >>"$LOG_FILE" 2>&1 &
+  local pid=$!
+  printf '%s\n' "$pid" >"$PID_FILE"
+
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      say "daemon failed to start; last log lines:"
+      tail -n 30 "$LOG_FILE" >&2 || true
+      rm -f "$PID_FILE"
+      return 1
+    fi
+    if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 1 "$(health_url)" >/dev/null 2>&1; then
+      say "started (pid $pid)  $(health_url)"
+      return 0
+    fi
+    sleep 0.4
+  done
+  say "started (pid $pid), but health check did not respond yet"
+  say "logs: tail -f $LOG_FILE"
+}
+
+cmd_stop() {
+  if ! is_running; then
+    say "not running"
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  local pid
+  pid="$(running_pid)"
+  if ! looks_like_daemon "$pid"; then
+    say "pid $pid does not look like t3lite; removing stale pidfile"
+    rm -f "$PID_FILE"
+    return 1
+  fi
+  say "stopping (pid $pid)…"
+  # Ask children (Pi) to stop first; the daemon also does this on SIGTERM.
+  pkill -TERM -P "$pid" 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+
+  local i
+  for i in $(seq 1 40); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      say "stopped"
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  say "still alive after SIGTERM; sending SIGKILL"
+  pkill -KILL -P "$pid" 2>/dev/null || true
+  kill -KILL "$pid" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  say "killed"
+}
+
+cmd_restart() {
+  cmd_stop
+  sleep 0.4
+  cmd_start
+}
+
+cmd_status() {
+  if is_running; then
+    local pid
+    pid="$(running_pid)"
+    say "daemon: running (pid $pid)"
+    if command -v ps >/dev/null 2>&1; then
+      say "uptime: $(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ' || echo '?')"
+    fi
+  else
+    say "daemon: stopped"
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    if out="$(curl -fsS --max-time 2 "$(health_url)" 2>/dev/null)"; then
+      say "health: $out"
+    else
+      say "health: no response ($(health_url))"
+    fi
+  else
+    say "health: curl not installed"
+  fi
+
+  say "home:   $T3LITE_HOME"
+  say "listen: $HOST:$PORT"
+  say "log:    $LOG_FILE"
+  if [ -n "${RELAY_URL:-}" ]; then say "relay:  $RELAY_URL"; fi
+  if [ -n "$ENV_FILE" ]; then say "env:    $ENV_FILE"; fi
+}
+
+cmd_logs() {
+  [ -f "$LOG_FILE" ] || die "no log file yet: $LOG_FILE"
+  if [ "${1:-}" = "-f" ] || [ "${1:-}" = "follow" ]; then
+    tail -n "${2:-100}" -f "$LOG_FILE"
+  else
+    tail -n "${1:-100}" "$LOG_FILE"
+  fi
+}
+
+cmd_pair() {
+  [ -n "${RELAY_URL:-}" ] || die "RELAY_URL is not set (put it in $T3LITE_HOME/env or /etc/t3lite.env)"
+  node src/pair.js
+}
+
+cmd_tui() {
+  if [ "$#" -gt 0 ]; then
+    exec node src/tui.js "$@"
+  fi
+  local h="$HOST"
+  [ "$h" = "0.0.0.0" ] && h="127.0.0.1"
+  exec node src/tui.js --ws "ws://$h:$PORT/ws"
+}
+
+cmd_doctor() {
+  local ok=0
+  say "T3 Lite doctor"
+  say ""
+
+  if command -v node >/dev/null; then
+    local major
+    major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    if [ "$major" -ge 22 ]; then
+      say "✓ node $(node -v)"
+    else
+      say "✗ node $(node -v) (need 22+)"
+      ok=1
+    fi
+  else
+    say "✗ node not found"
+    ok=1
+  fi
+
+  if [ -n "${PI_BIN:-}" ]; then
+    if [ -x "$PI_BIN" ]; then say "✓ pi: $PI_BIN"; else say "✗ PI_BIN not executable: $PI_BIN"; ok=1; fi
+  elif command -v pi >/dev/null; then
+    say "✓ pi: $(command -v pi)"
+  else
+    say "✗ pi not found in PATH (set PI_BIN)"
+    ok=1
+  fi
+
+  if command -v git >/dev/null; then say "✓ git: $(git --version)"; else say "✗ git not found"; ok=1; fi
+
+  if is_running; then say "✓ daemon: running (pid $(running_pid))"; else say "• daemon: stopped"; fi
+
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS --max-time 2 "$(health_url)" >/dev/null 2>&1; then
+      say "✓ health: $(health_url)"
+    else
+      say "• health: no response"
+    fi
+  fi
+
+  if [ -n "${RELAY_URL:-}" ]; then
+    local u="${RELAY_URL/wss:/https:}"
+    u="${u/ws:/http:}"
+    u="${u%/}"
+    if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "$u/health" >/dev/null 2>&1; then
+      say "✓ relay: $u/health"
+    else
+      say "• relay: no response ($u/health)"
+    fi
+  else
+    say "• relay: not configured (local only)"
+  fi
+
+  say ""
+  say "home: $T3LITE_HOME"
+  if [ -n "$ENV_FILE" ]; then say "env:  $ENV_FILE"; fi
+  return "$ok"
+}
+
+usage() {
+  cat <<'EOF'
+T3 Lite daemon manager
+
+Usage:
+  t3lite start            start in background (pid + log in ~/.t3lite)
+  t3lite stop             graceful stop (SIGTERM, then SIGKILL)
+  t3lite restart          stop + start
+  t3lite status           pid, uptime, health, paths
+  t3lite logs [n|-f]      show or follow the log
+  t3lite pair             print a pairing link (needs RELAY_URL)
+  t3lite tui              open the TUI against this daemon
+  t3lite doctor           check node / pi / git / health / relay
+  t3lite run              run in the foreground (no pidfile)
+
+Environment:
+  T3LITE_HOME             data dir (default ~/.t3lite)
+  T3LITE_ENV_FILE         env file (default $T3LITE_HOME/env, then /etc/t3lite.env)
+  PORT, HOST              listen address (default 127.0.0.1:4317)
+  RELAY_URL, RELAY_TOKEN  Cloudflare/Node relay
+  T3LITE_SERVER_ID        relay server id
+  PI_BIN                  pi executable
+
+Examples:
+  printf 'T3LITE_MOCK=1\nPORT=4317\n' > ~/.t3lite/env
+  ./bin/t3lite start
+  ./bin/t3lite status
+  ./bin/t3lite logs -f
+  ./bin/t3lite stop
+EOF
+}
+
+cmd_run() {
+  exec node src/server.js
+}
+
+cmd="${1:-help}"
+shift || true
+case "$cmd" in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_restart ;;
+  status) cmd_status ;;
+  logs) cmd_logs "$@" ;;
+  pair) cmd_pair ;;
+  tui) cmd_tui "$@" ;;
+  doctor) cmd_doctor ;;
+  run) cmd_run ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac
